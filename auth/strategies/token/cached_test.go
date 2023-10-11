@@ -1,0 +1,92 @@
+package token
+
+import (
+	"context"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/krateoplatformops/authn-lib/auth"
+	"github.com/krateoplatformops/authn-lib/gcache"
+)
+
+func TestNewCahced(t *testing.T) {
+	table := []struct {
+		name        string
+		expectedErr bool
+		authFunc    AuthenticateFunc
+		info        any
+		token       string
+	}{
+		{
+			name:        "it return error when user authenticate func return error",
+			expectedErr: true,
+			authFunc:    NoOpAuthenticate,
+			info:        nil,
+		},
+		{
+			name:        "it return error when cache return invalid type",
+			expectedErr: true,
+			authFunc: func(_ context.Context, _ *http.Request, _ string) (auth.Info, time.Time, error) {
+				return nil, time.Time{}, nil
+			},
+			info:  "sample-data",
+			token: "valid",
+		},
+		{
+			name:        "it return user when token cached",
+			expectedErr: false,
+			authFunc:    NoOpAuthenticate,
+			info:        auth.NewDefaultUser("1", "1", nil, nil),
+			token:       "valid-user",
+		},
+	}
+
+	for _, tt := range table {
+		t.Run(tt.name, func(t *testing.T) {
+			cache := gcache.New(10).LRU().Build()
+			strategy := New(tt.authFunc, cache)
+			r, _ := http.NewRequest("GET", "/", nil)
+			r.Header.Set("Authorization", "Bearer "+tt.token)
+			cache.Set(tt.token, tt.info)
+			info, err := strategy.Authenticate(r.Context(), r)
+			if tt.expectedErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.Equal(t, tt.info, info)
+		})
+	}
+}
+
+func TestCahcedTokenAppend(t *testing.T) {
+	cache := gcache.New(10).LRU().Build()
+	s := New(nil, cache)
+	info := auth.NewDefaultUser("1", "2", nil, nil)
+	auth.Append(s, "test-append", info)
+	cachedInfo, err := cache.Get("test-append")
+	assert.Nil(t, err)
+	assert.Equal(t, info, cachedInfo)
+}
+
+func BenchmarkCachedToken(b *testing.B) {
+	r, _ := http.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer token")
+
+	cache := gcache.New(10).LRU().Build()
+	cache.Set("token", auth.NewDefaultUser("benchmark", "1", nil, nil))
+
+	strategy := New(NoOpAuthenticate, cache)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, err := strategy.Authenticate(r.Context(), r)
+			if err != nil {
+				b.Error(err)
+			}
+		}
+	})
+}
